@@ -5,6 +5,6 @@ all:
 clean:
 	rm -f *.[osa] *~
 
-obj-m		:= testmod.o
+obj-m		:= h3600_rfm12.o
 
 include $(TOPDIR)/Rules.make

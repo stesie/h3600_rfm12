@@ -1,5 +1,5 @@
 /*
- * testmod.c - skeleton module for the iPAQ
+ * h3600_rfm12.c - RFM12 FSK-transmitter kernel driver for iPAQ h3600
  *
  * Copyright (C) 2008 Stefan Siegl <stesie@brokenpipe.de>
  *
@@ -22,12 +22,12 @@
 #include <linux/kmod.h>
 #include <linux/kernel.h>
 
-#define MODULE_NAME "testmod"
+#define MODULE_NAME "h3600_rfm12"
 
 int
 init_module (void)
 {
-	printk (KERN_INFO MODULE_NAME ": testmod_init called.\n");
+	printk (KERN_INFO MODULE_NAME ": init_module called.\n");
 	return 0;
 }
 
@@ -35,10 +35,10 @@ init_module (void)
 void
 cleanup_module (void)
 {
-	printk (KERN_INFO MODULE_NAME ": testmod_exit called.\n");
+	printk (KERN_INFO MODULE_NAME ": cleanup_module called.\n");
 }
 
 
-MODULE_DESCRIPTION ("Simple testing module for the iPAQ");
+MODULE_DESCRIPTION ("RFM12 FSK-transmitter driver for iPAQ h3600");
 MODULE_AUTHOR ("Stefan Siegl");
 MODULE_LICENSE ("GPL");
