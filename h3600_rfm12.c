@@ -137,7 +137,7 @@ init_module (void)
 	chip_rxstart ();
 
 	/* initiate dummy read */
-	h3600_rfm12 (0x0000);
+	chip_trans (0x0000);
 
 	return 0;
 }
@@ -147,6 +147,9 @@ void
 cleanup_module (void)
 {
 	printk (KERN_INFO MODULE_NAME ": cleanup_module called.\n");
+
+	/* completely shutdown the rfm12 module */
+	chip_trans (0x8200);
 }
 
 
