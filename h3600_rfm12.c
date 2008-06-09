@@ -41,9 +41,22 @@ struct net_device rfm12_dev;
 /*
  * RFM12 Chip low-level functions
  */
-#define chip_trans(a)  h3600_rfm12(a)
+#define chip_trans_raw(buf,len) h3600_rfm12(buf,len)
 
-static enum {
+static inline int
+chip_trans(unsigned short a)
+{
+	unsigned char buf[2];
+	
+	buf[0] = ((a) & 0xFF00) >> 8;
+	buf[1] = ((a) & 0x00FF);
+
+	return chip_trans_raw (buf, 2);
+}
+
+
+
+static enum chip_status_t {
 	CHIP_IDLE,
 	CHIP_RX,
 	CHIP_RX_DATA,
@@ -127,20 +140,14 @@ chip_init (void)
 	chip_setpower (0, 2);
 }
 
-/* Special variant of chip_trans, that tests the return value of `chip_trans',
-   unless successful requeues the bh for execution and immediately returns. */
-#define chip_trans_bh(a)					\
-	do {							\
-	        int _r = chip_trans(a);				\
-		if(_r) {					\
-			queue_task (&chip_task, &tq_timer);	\
-			return;					\
-		}						\
-	} while(0)
-
 #define chip_rxstart() (chip_status = CHIP_RX, chip_trans (0xfe00))
 #define chip_rxstop()  (chip_trans (0x8208))
-#define chip_txstart() (chip_status = CHIP_TX, chip_bh (NULL))
+#define chip_txstart()				\
+	do {					\
+		chip_status = CHIP_TX;		\
+		STATS->tx_packets ++;		\
+		chip_bh (NULL);			\
+	} while(0)
 
 
 static void chip_bh (void *foo);
@@ -149,10 +156,82 @@ static struct tq_struct chip_task = {
 };
 
 
+/* Special variants of chip_trans, that tests the return value of `chip_trans',
+   unless successful requeues the bh for execution, restores the context
+   and immediately returns. */
+#define __bh(a)							\
+	do {							\
+	        int _r = a;					\
+		if(_r) {					\
+			queue_task (&chip_task, &tq_timer);	\
+			chip_status = restore_status;		\
+			if (restore_data) {			\
+				tx_packet->len = restore_len;	\
+				tx_packet->data = restore_data;	\
+			}					\
+			return;					\
+		}						\
+	} while(0)
+
+#define chip_trans_bh(a)       __bh(chip_trans(a))
+#define chip_trans_raw_bh(a,b) __bh(chip_trans_raw(a,b))
+#define chip_rxstart_bh()      __bh(chip_rxstart())
+#define chip_rxstop_bh()       __bh(chip_rxstop())
+
+
+static unsigned char
+chip_generate_tx_data (void)
+{
+	switch (chip_status) {
+	case CHIP_TX:
+	case CHIP_TX_PREAMBLE_1:
+	case CHIP_TX_PREAMBLE_2:
+		chip_status ++;
+		return 0xAA;
+
+	case CHIP_TX_PREFIX_1:
+		chip_status ++;
+		return 0x2D;
+
+	case CHIP_TX_PREFIX_2:
+		chip_status ++;
+		return 0xD4;
+
+	case CHIP_TX_SIZE:
+		chip_status ++;
+		return tx_packet->len & 0xFF;
+
+	case CHIP_TX_DATA:
+		STATS->tx_bytes ++;
+		int r = (tx_packet->data[0] & 0xFF);
+		skb_pull (tx_packet, 1);
+		if (!tx_packet->len)
+			chip_status = CHIP_TX_SUFFIX_1;
+		return r;
+
+	case CHIP_TX_SUFFIX_1:
+	case CHIP_TX_SUFFIX_2:
+		chip_status ++;
+		return 0xAA;
+
+	default:
+		ERROR ("%s: eeeek, cannot handle status %d.\n",
+		       __FUNCTION__, chip_status);
+		return 0;
+	}
+}
+
+
 static void
 chip_bh (void *foo)
 {
 	(void) foo;
+
+	/* track-back values, in case __bh fails. */
+	enum chip_status_t restore_status = chip_status;
+	unsigned int restore_len = tx_packet ? tx_packet->len : 0;
+	unsigned char *restore_data = tx_packet ? tx_packet->data : NULL;
+
 	/* This function is executed in softirq context, therefore chip_trans
 	   will not be able to sleep until other communication with the AVR
 	   has completed.
@@ -185,58 +264,51 @@ chip_bh (void *foo)
 		}
 		break;
 
-	case CHIP_TX:
-		STATS->tx_packets ++;
 
+	case CHIP_TX:
 	case CHIP_TX_PREAMBLE_1:
 	case CHIP_TX_PREAMBLE_2:
-		chip_trans_bh (0xF1AA);
-		chip_status ++;
-		break;
-
 	case CHIP_TX_PREFIX_1:
-		chip_trans_bh (0xF02D);
-		chip_status ++;
-		break;
-
 	case CHIP_TX_PREFIX_2:
-		chip_trans_bh (0xF0D4);
-		chip_status ++;
-		break;
-
 	case CHIP_TX_SIZE:
-		chip_trans_bh (0xF000 | (tx_packet->len & 0xFF));
-		chip_status ++;
-		break;
-
 	case CHIP_TX_DATA:
-		STATS->tx_bytes ++;
-		chip_trans_bh (0xF000 | (tx_packet->data[0] & 0xFF));
-		skb_pull (tx_packet, 1);
-		if (!tx_packet->len)
-			chip_status = CHIP_TX_SUFFIX_1;
-		break;
-
+	case CHIP_TX_DATAEND:
 	case CHIP_TX_SUFFIX_1:
 	case CHIP_TX_SUFFIX_2:
-		chip_trans_bh (0xF0AA);
-		chip_status ++;
-		break;
+	case CHIP_TX_END: {
+		unsigned char buf[15];
+		unsigned short len = 1;
 
-	case CHIP_TX_END:
-		chip_trans_bh (0x8208); /* TX off */
-		DEBUG (MODULE_NAME ": TX: complete.\n");
+		DEBUG ("%s: status=%d, len=%d\n", __FUNCTION__,
+		       chip_status, tx_packet->len);
+		
+		/* send TX-triggering command only on first shot,
+		   so we'll be able to make use of the underrun recognition. */
+		buf[0] = (chip_status == CHIP_TX) ? 0xF1 : 0xF0;
 
-		dev_kfree_skb_irq (tx_packet);
-		tx_packet = NULL;
+		while (chip_status < CHIP_TX_END && len < 12) {
+			buf[len] = chip_generate_tx_data ();
+			len ++;
+		}
 
-		rfm12_net_wake_queue ();
+		/* try to commit data, will return if fail */
+		chip_trans_raw_bh (buf, len);
+
+		if (chip_status == CHIP_TX_END) {
+			DEBUG (MODULE_NAME ": TX: complete.\n");
+
+			dev_kfree_skb_irq (tx_packet);
+			tx_packet = NULL;
+
+			rfm12_net_wake_queue ();
+		}
 
 		/* Reenable RX next time around. */
-		chip_status = CHIP_IDLE;
-		queue_task (&chip_task, &tq_timer);
+		//chip_status = CHIP_IDLE;
+		//queue_task (&chip_task, &tq_timer);
 		
 		break;
+	}
 
 	default:
 		ERROR ("%s: unexpected chip_status=%d\n",
