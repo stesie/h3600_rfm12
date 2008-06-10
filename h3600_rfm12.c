@@ -28,6 +28,9 @@
 #include "h3600_rfm12.h"
 
 
+/* #define USE_STATUS_TIMER */
+
+
 /* Some forward declarations. */
 static void chip_handler (unsigned char byte);
 
@@ -78,7 +81,7 @@ static enum chip_status_t {
 static struct sk_buff *rx_packet, *tx_packet;
 static int packet_len;
 static int packet_index;
-
+static int buffer_position;
 
 static void
 chip_setbandwidth(u8 bandwidth, u8 gain, u8 drssi)
@@ -140,7 +143,7 @@ chip_init (void)
 	chip_setpower (0, 2);
 }
 
-#define chip_rxstart() (chip_status = CHIP_RX, chip_trans (0xfe00))
+#define chip_rxstart() (chip_status = CHIP_RX, chip_trans (0xf100))
 #define chip_rxstop()  (chip_trans (0x8208))
 #define chip_txstart()				\
 	do {					\
@@ -159,18 +162,21 @@ static struct tq_struct chip_task = {
 /* Special variants of chip_trans, that tests the return value of `chip_trans',
    unless successful requeues the bh for execution, restores the context
    and immediately returns. */
-#define __bh(a)							\
-	do {							\
-	        int _r = a;					\
-		if(_r) {					\
-			queue_task (&chip_task, &tq_timer);	\
-			chip_status = restore_status;		\
-			if (restore_data) {			\
-				tx_packet->len = restore_len;	\
-				tx_packet->data = restore_data;	\
-			}					\
-			return;					\
-		}						\
+#define __bh(a)								\
+	do {								\
+	        int _r = a;						\
+		if(_r) {						\
+			DEBUG ("%s: __bh fail in line %d.\n",		\
+			       __FUNCTION__, __LINE__);			\
+			queue_task (&chip_task, &tq_timer);		\
+			chip_status = restore_status;			\
+			buffer_position = restore_buffer_position;	\
+			if (restore_data) {				\
+				tx_packet->len = restore_len;		\
+				tx_packet->data = restore_data;		\
+			}						\
+			return;						\
+		}							\
 	} while(0)
 
 #define chip_trans_bh(a)       __bh(chip_trans(a))
@@ -231,6 +237,7 @@ chip_bh (void *foo)
 	enum chip_status_t restore_status = chip_status;
 	unsigned int restore_len = tx_packet ? tx_packet->len : 0;
 	unsigned char *restore_data = tx_packet ? tx_packet->data : NULL;
+	unsigned int restore_buffer_position = buffer_position;
 
 	/* This function is executed in softirq context, therefore chip_trans
 	   will not be able to sleep until other communication with the AVR
@@ -246,7 +253,7 @@ chip_bh (void *foo)
 			rfm12_net_rx (rx_packet);
 			rx_packet = NULL;
 
-			DEBUG ("%s: packet done.\n", __FUNCTION__);
+			/* DEBUG ("%s: packet done.\n", __FUNCTION__); */
 		}
 
 		/* fall through */
@@ -266,6 +273,9 @@ chip_bh (void *foo)
 
 
 	case CHIP_TX:
+		DEBUG ("%s: preparing TX.\n", __FUNCTION__);
+		buffer_position = 3;
+
 	case CHIP_TX_PREAMBLE_1:
 	case CHIP_TX_PREAMBLE_2:
 	case CHIP_TX_PREFIX_1:
@@ -274,19 +284,15 @@ chip_bh (void *foo)
 	case CHIP_TX_DATA:
 	case CHIP_TX_DATAEND:
 	case CHIP_TX_SUFFIX_1:
-	case CHIP_TX_SUFFIX_2:
-	case CHIP_TX_END: {
+	case CHIP_TX_SUFFIX_2: {
 		unsigned char buf[15];
 		unsigned short len = 1;
 
-		DEBUG ("%s: status=%d, len=%d\n", __FUNCTION__,
-		       chip_status, tx_packet->len);
-		
 		/* send TX-triggering command only on first shot,
 		   so we'll be able to make use of the underrun recognition. */
-		buf[0] = (chip_status == CHIP_TX) ? 0xF1 : 0xF0;
+		buf[0] = 0xF0 | buffer_position;
 
-		while (chip_status < CHIP_TX_END && len < 12) {
+		while (chip_status < CHIP_TX_END && len < 15) {
 			buf[len] = chip_generate_tx_data ();
 			len ++;
 		}
@@ -294,21 +300,26 @@ chip_bh (void *foo)
 		/* try to commit data, will return if fail */
 		chip_trans_raw_bh (buf, len);
 
-		if (chip_status == CHIP_TX_END) {
-			DEBUG (MODULE_NAME ": TX: complete.\n");
+		/* fill next buffer, next time around */
+		buffer_position ++;
 
-			dev_kfree_skb_irq (tx_packet);
-			tx_packet = NULL;
-
-			rfm12_net_wake_queue ();
-		}
-
-		/* Reenable RX next time around. */
-		//chip_status = CHIP_IDLE;
-		//queue_task (&chip_task, &tq_timer);
+		/* if (chip_status == CHIP_TX_END)
+		   DEBUG (MODULE_NAME ": TX: buffer fill complete.\n"); */
 		
 		break;
 	}
+
+	case CHIP_TX_END: 
+		DEBUG ("%s: triggering TX.\n", __FUNCTION__);
+		chip_trans_bh (0xf200 | (buffer_position - 1));
+
+		chip_status = CHIP_RX; /* automatically enabled by AVR */
+
+		dev_kfree_skb_irq (tx_packet);
+		tx_packet = NULL;
+
+		rfm12_net_wake_queue ();
+		break;
 
 	default:
 		ERROR ("%s: unexpected chip_status=%d\n",
@@ -355,7 +366,7 @@ chip_handler (unsigned char byte)
 		break;
 
 	case CHIP_RX_FINISH:
-		DEBUG ("%s: RX_FINISH set, ignoring.\n", __FUNCTION__);
+		/* DEBUG ("%s: RX_FINISH set, ignoring.\n", __FUNCTION__); */
 		break;		/* hmm, packet already complete */
 
 	case CHIP_TX:
@@ -396,7 +407,7 @@ chip_queue_tx (struct sk_buff *skb)
 
 	else {
 		ret = 1;	/* error */
-		//STATS->tx_dropped ++;
+		STATS->tx_dropped ++;
 	}
 
 	return ret;
@@ -411,6 +422,7 @@ static struct h3600_driver_ops g_driver_ops = {
 
 
 
+#ifdef USE_STATUS_TIMER
 /*
  * Status call timer
  */
@@ -427,7 +439,7 @@ rfm12_status_timer (void)
 	rfm12_timer.expires = jiffies + 15 * HZ;
 	add_timer (&rfm12_timer);
 }
-
+#endif
 
 
 
@@ -482,11 +494,11 @@ rfm12_net_stats (struct net_device *dev)
 static int
 rfm12_net_init (struct net_device *dev)
 {
-	DEBUG ("%s.\n", __FUNCTION__);
+	/* DEBUG ("%s.\n", __FUNCTION__); */
 
 	dev->hard_header_len = 0;
 	dev->addr_len = 0;
-	dev->mtu = 254;
+	dev->mtu = 176;
 
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_NOARP | IFF_MULTICAST | IFF_BROADCAST;
@@ -570,10 +582,12 @@ init_module (void)
 
 	h3600_hal_register_driver (&g_driver_ops);
 
+#ifdef USE_STATUS_TIMER
 	init_timer (&rfm12_timer);
 	rfm12_timer.expires = jiffies + HZ; /* timeout after one second. */
 	rfm12_timer.function = (void *) rfm12_status_timer;
 	add_timer (&rfm12_timer);
+#endif
 
 	return 0;
 }
@@ -584,8 +598,10 @@ cleanup_module (void)
 {
 	printk (KERN_INFO MODULE_NAME ": cleanup_module called.\n");
 
+#ifdef USE_STATUS_TIMER
 	/* Remove the status timer. */
 	del_timer (&rfm12_timer);
+#endif
 
 	/* Remove the net device. */
 	rfm12_net_unregister ();
