@@ -28,7 +28,7 @@
 #include "h3600_rfm12.h"
 
 
-/* #define USE_STATUS_TIMER */
+#define USE_STATUS_TIMER
 
 
 /* Some forward declarations. */
@@ -366,7 +366,8 @@ chip_handler (unsigned char byte)
 		break;
 
 	case CHIP_RX_FINISH:
-		/* DEBUG ("%s: RX_FINISH set, ignoring.\n", __FUNCTION__); */
+		DEBUG ("%s: RX_FINISH set, ignoring byte=0x%02x.\n",
+		       __FUNCTION__, byte);
 		break;		/* hmm, packet already complete */
 
 	case CHIP_TX:
@@ -432,6 +433,9 @@ static struct timer_list rfm12_timer;
 static void
 rfm12_status_timer (void)
 {
+	DEBUG ("%s: status req, chip_status = %d.\n",
+	       __FUNCTION__, chip_status);
+
 	chip_trans (0x0000);
 
 	/* Update timer to expire in 15 seconds. */
