@@ -28,17 +28,21 @@
 #include "h3600_rfm12.h"
 
 
-#define USE_STATUS_TIMER
-
-
 /* Some forward declarations. */
 static void chip_handler (unsigned char byte);
 
 static void rfm12_net_wake_queue (void);
 static void rfm12_net_rx (struct sk_buff *skb);
 
-struct net_device rfm12_dev;
+static struct net_device rfm12_dev;
 
+/* Timestamp (jiffies) when last chip_status-change happened,
+   used to calculate chip restart. */
+static unsigned long timer_last_status_change;
+
+/* Timestamp (jiffies again) when the last rfm12 status
+   query took place. */
+static unsigned long timer_last_status_query;
 
 
 /*
@@ -56,7 +60,6 @@ chip_trans(unsigned short a)
 
 	return chip_trans_raw (buf, 2);
 }
-
 
 
 static enum chip_status_t {
@@ -77,6 +80,10 @@ static enum chip_status_t {
 	CHIP_TX_SUFFIX_2,
 	CHIP_TX_END,
 } chip_status;
+
+#define update_chip_status(a) (timer_last_status_change = jiffies,	\
+			       chip_status = (a))
+
 
 static struct sk_buff *rx_packet, *tx_packet;
 static int packet_len;
@@ -143,11 +150,11 @@ chip_init (void)
 	chip_setpower (0, 2);
 }
 
-#define chip_rxstart() (chip_status = CHIP_RX, chip_trans (0xf100))
+#define chip_rxstart() (update_chip_status(CHIP_RX), chip_trans (0xf100))
 #define chip_rxstop()  (chip_trans (0x8208))
 #define chip_txstart()				\
 	do {					\
-		chip_status = CHIP_TX;		\
+		update_chip_status(CHIP_TX);	\
 		STATS->tx_packets ++;		\
 		chip_bh (NULL);			\
 	} while(0)
@@ -305,7 +312,8 @@ chip_bh (void *foo)
 
 		/* if (chip_status == CHIP_TX_END)
 		   DEBUG (MODULE_NAME ": TX: buffer fill complete.\n"); */
-		
+
+		timer_last_status_change = jiffies;
 		break;
 	}
 
@@ -313,7 +321,7 @@ chip_bh (void *foo)
 		DEBUG ("%s: triggering TX.\n", __FUNCTION__);
 		chip_trans_bh (0xf200 | (buffer_position - 1));
 
-		chip_status = CHIP_RX; /* automatically enabled by AVR */
+		update_chip_status(CHIP_RX); /* automatically enabled by AVR */
 
 		dev_kfree_skb_irq (tx_packet);
 		tx_packet = NULL;
@@ -343,9 +351,9 @@ chip_handler (unsigned char byte)
 
 		if (rx_packet) {
 			packet_index = 0;
-			chip_status = CHIP_RX_DATA;
+			update_chip_status(CHIP_RX_DATA);
 		} else {
-			chip_status = CHIP_IDLE;
+			update_chip_status(CHIP_IDLE);
 
 			/* run bottom half to initiate restart */
 			queue_task (&chip_task, &tq_timer);
@@ -354,6 +362,9 @@ chip_handler (unsigned char byte)
 
 	case CHIP_RX_DATA:
 		skb_put (rx_packet, 1)[0] = byte;
+
+		/* make sure not to time out. */
+		timer_last_status_change = jiffies;
 
 		if (++ packet_index == packet_len) {
 			DEBUG ("RX: complete.\n");
@@ -381,7 +392,9 @@ chip_handler (unsigned char byte)
 	case CHIP_TX_SUFFIX_1:
 	case CHIP_TX_SUFFIX_2:
 	case CHIP_TX_END:
-		chip_bh (NULL);	/* Implemented in _bh, use these. */
+		/* Implemented in _bh, use these. */
+		// chip_bh (NULL);
+		queue_task (&chip_task, &tq_timer);
 		break;
 
 	default:
@@ -423,7 +436,6 @@ static struct h3600_driver_ops g_driver_ops = {
 
 
 
-#ifdef USE_STATUS_TIMER
 /*
  * Status call timer
  */
@@ -433,17 +445,40 @@ static struct timer_list rfm12_timer;
 static void
 rfm12_status_timer (void)
 {
-	DEBUG ("%s: status req, chip_status = %d.\n",
-	       __FUNCTION__, chip_status);
+	/* Time out transfer after 200ms. */
+	if (chip_status > CHIP_RX
+	    && timer_last_status_change < jiffies - HZ / 5) {
+		ERROR ("transfer timed out, status=%d\n", chip_status);
 
-	chip_trans (0x0000);
+		if (chip_status >= CHIP_TX) {
+			if (tx_packet)
+				dev_kfree_skb_irq (tx_packet);
+			tx_packet = NULL;
 
-	/* Update timer to expire in 15 seconds. */
+			rfm12_net_wake_queue ();
+		}
+
+		update_chip_status(CHIP_IDLE);
+
+		/* leave the work to the bottom half. */
+		queue_task (&chip_task, &tq_timer);
+	}
+
+	/* Do a status query every 15 seconds. */
+	if (chip_status <= CHIP_RX
+	    && timer_last_status_query < jiffies - HZ * 15) {
+		DEBUG ("%s: status req, chip_status = %d.\n",
+		       __FUNCTION__, chip_status);
+
+		chip_trans (0x0000); /* may fail. */
+		timer_last_status_query = jiffies;
+	}
+
+	/* Update timer to expire in 0.2 seconds again. */
 	del_timer (&rfm12_timer);
-	rfm12_timer.expires = jiffies + 15 * HZ;
+	rfm12_timer.expires = jiffies + HZ / 5;
 	add_timer (&rfm12_timer);
 }
-#endif
 
 
 
@@ -477,6 +512,12 @@ rfm12_net_xmit (struct sk_buff *skb, struct net_device *dev)
 {
 	DEBUG ("TX: len=%d.\n", skb->len);
 
+	if (skb->len > 174) {
+		ERROR ("cowardly refusing to send packets longer "
+		       "than 174 bytes.\n");
+		return 1;
+	}
+
 	netif_stop_queue (dev);
 
 	if (chip_queue_tx (skb)) {
@@ -502,7 +543,7 @@ rfm12_net_init (struct net_device *dev)
 
 	dev->hard_header_len = 0;
 	dev->addr_len = 0;
-	dev->mtu = 176;
+	dev->mtu = 174;
 
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_NOARP | IFF_MULTICAST | IFF_BROADCAST;
@@ -557,7 +598,7 @@ rfm12_net_wake_queue (void)
 }
 
 
-struct net_device rfm12_dev = { 
+static struct net_device rfm12_dev = { 
         init:            rfm12_net_init,
 	open:            rfm12_net_open,
 	stop:            rfm12_net_close,
@@ -586,12 +627,10 @@ init_module (void)
 
 	h3600_hal_register_driver (&g_driver_ops);
 
-#ifdef USE_STATUS_TIMER
 	init_timer (&rfm12_timer);
-	rfm12_timer.expires = jiffies + HZ; /* timeout after one second. */
+	rfm12_timer.expires = jiffies + HZ / 5;
 	rfm12_timer.function = (void *) rfm12_status_timer;
 	add_timer (&rfm12_timer);
-#endif
 
 	return 0;
 }
@@ -602,10 +641,8 @@ cleanup_module (void)
 {
 	printk (KERN_INFO MODULE_NAME ": cleanup_module called.\n");
 
-#ifdef USE_STATUS_TIMER
 	/* Remove the status timer. */
 	del_timer (&rfm12_timer);
-#endif
 
 	/* Remove the net device. */
 	rfm12_net_unregister ();
