@@ -78,7 +78,8 @@ static enum chip_status_t {
 	CHIP_TX_DATAEND,
 	CHIP_TX_SUFFIX_1,
 	CHIP_TX_SUFFIX_2,
-	CHIP_TX_END,
+	CHIP_TX_TRIGGER,
+	CHIP_TX_WAIT,
 } chip_status;
 
 #define update_chip_status(a) (timer_last_status_change = jiffies,	\
@@ -299,7 +300,7 @@ chip_bh (void *foo)
 		   so we'll be able to make use of the underrun recognition. */
 		buf[0] = 0xF0 | buffer_position;
 
-		while (chip_status < CHIP_TX_END && len < 15) {
+		while (chip_status < CHIP_TX_TRIGGER && len < 15) {
 			buf[len] = chip_generate_tx_data ();
 			len ++;
 		}
@@ -310,23 +311,18 @@ chip_bh (void *foo)
 		/* fill next buffer, next time around */
 		buffer_position ++;
 
-		/* if (chip_status == CHIP_TX_END)
+		/* if (chip_status == CHIP_TX_TRIGGER)
 		   DEBUG (MODULE_NAME ": TX: buffer fill complete.\n"); */
 
 		timer_last_status_change = jiffies;
 		break;
 	}
 
-	case CHIP_TX_END: 
+	case CHIP_TX_TRIGGER: 
 		DEBUG ("%s: triggering TX.\n", __FUNCTION__);
 		chip_trans_bh (0xf200 | (buffer_position - 1));
 
-		update_chip_status(CHIP_RX); /* automatically enabled by AVR */
-
-		dev_kfree_skb_irq (tx_packet);
-		tx_packet = NULL;
-
-		rfm12_net_wake_queue ();
+		update_chip_status(CHIP_TX_WAIT);
 		break;
 
 	default:
@@ -391,11 +387,24 @@ chip_handler (unsigned char byte)
 	case CHIP_TX_DATAEND:
 	case CHIP_TX_SUFFIX_1:
 	case CHIP_TX_SUFFIX_2:
-	case CHIP_TX_END:
+	case CHIP_TX_TRIGGER:
 		/* Implemented in _bh, use these. */
 		// chip_bh (NULL);
 		queue_task (&chip_task, &tq_timer);
 		break;
+
+	case CHIP_TX_WAIT:
+		DEBUG ("%s: TX complete (0x%02x).\n", __FUNCTION__, byte);
+		/* RX mode has been re-enabled by the AVR meanwhile. */
+
+		update_chip_status(CHIP_RX);
+
+		dev_kfree_skb_irq (tx_packet);
+		tx_packet = NULL;
+
+		rfm12_net_wake_queue ();
+		break;
+
 
 	default:
 		ERROR ("%s: unexpected chip_status=%d\n",
