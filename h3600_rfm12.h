@@ -26,7 +26,11 @@
 #define MODULE_NAME "h3600_rfm12"
 
 /* Replace DEBUG by printk(a) to enable debug output. */
+#if 0
 #define DEBUG(a...)   printk(KERN_INFO MODULE_NAME ": " a)
+#else
+#define DEBUG(a...)   do { } while(0)
+#endif
 #define ERROR(a...)   printk(KERN_ERR  MODULE_NAME ": " a)
 
 #define STATS ((struct net_device_stats *) rfm12_dev.priv)
