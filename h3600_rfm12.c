@@ -153,11 +153,11 @@ chip_init (void)
 
 #define chip_rxstart() (update_chip_status(CHIP_RX), chip_trans (0xf100))
 #define chip_rxstop()  (chip_trans (0x8208))
-#define chip_txstart()				\
-	do {					\
-		update_chip_status(CHIP_TX);	\
-		STATS->tx_packets ++;		\
-		chip_bh (NULL);			\
+#define chip_txstart()					\
+	do {						\
+		update_chip_status(CHIP_TX);		\
+		STATS->tx_packets ++;			\
+		queue_task (&chip_task, &tq_timer);	\
 	} while(0)
 
 
@@ -249,24 +249,10 @@ chip_bh (void *foo)
 
 	/* This function is executed in softirq context, therefore chip_trans
 	   will not be able to sleep until other communication with the AVR
-	   has completed.
-
-	   Furthermore it's running in (hard) interrupt context since the
-	   interrupt handler directly calls this functions to make immediate
-	   use of the TX routines. */
+	   has completed.  */
 
 	switch (chip_status) {
-	case CHIP_RX_FINISH:
-		if (rx_packet) {
-			rfm12_net_rx (rx_packet);
-			rx_packet = NULL;
-
-			/* DEBUG ("%s: packet done.\n", __FUNCTION__); */
-		}
-
-		/* fall through */
 	case CHIP_IDLE:
-
 		if (tx_packet)
 			/* send queued packet now. */
 			chip_txstart ();
@@ -365,9 +351,14 @@ chip_handler (unsigned char byte)
 		if (++ packet_index == packet_len) {
 			DEBUG ("RX: complete.\n");
 
-			/* run bottom half */
-			chip_status = CHIP_RX_FINISH; 
-			queue_task (&chip_task, &tq_timer);
+			rfm12_net_rx (rx_packet);
+			rx_packet = NULL;
+
+			if (tx_packet)
+				chip_txstart ();
+
+			else
+				update_chip_status(CHIP_RX);
 		}
 
 		break;
@@ -407,8 +398,8 @@ chip_handler (unsigned char byte)
 
 
 	default:
-		ERROR ("%s: unexpected chip_status=%d\n",
-		       __FUNCTION__, chip_status);
+		ERROR ("%s: unexpected chip_status=%d, byte=0x%02x\n",
+		       __FUNCTION__, chip_status, byte);
 	}
 }
 
