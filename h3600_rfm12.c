@@ -63,6 +63,20 @@ chip_trans(unsigned short a)
 
 
 static enum chip_status_t {
+	CHIP_INIT_CLK,
+	CHIP_INIT_ENFIFO,
+	CHIP_INIT_FILTER,
+	CHIP_INIT_SETFIFO,
+	CHIP_INIT_DISWKUP,
+	CHIP_INIT_DISLDC,
+	CHIP_INIT_AUTOTUN,
+
+	CHIP_CONF_PREP,
+	CHIP_CONF_FREQ,
+	CHIP_CONF_BW,
+	CHIP_CONF_BAUD,
+	CHIP_CONF_PWR,
+
 	CHIP_IDLE,
 	CHIP_RX,
 	CHIP_RX_DATA,
@@ -91,15 +105,15 @@ static int packet_len;
 static int packet_index;
 static int buffer_position;
 
-static void
+static unsigned short
 chip_setbandwidth(u8 bandwidth, u8 gain, u8 drssi)
 {
-	chip_trans (0x9400 | ((bandwidth & 7) << 5)
-		    | ((gain & 3) << 3) | (drssi & 7));
+	return (0x9400 | ((bandwidth & 7) << 5)
+		| ((gain & 3) << 3) | (drssi & 7));
 }
 
 
-static void
+static unsigned short
 chip_setfreq(u16 freq)
 {	
 	if (freq < 96)		/* 430,2400MHz */
@@ -108,57 +122,58 @@ chip_setfreq(u16 freq)
 	else if (freq > 3903)	/* 439,7575MHz */
 		freq = 3903;
 
-	chip_trans (0xA000 | freq);
+	return (0xA000 | freq);
 }
 
 
-static void
+static unsigned short
 chip_setbaud(u16 baud)
 {
 	if (baud < 663)
-		return;
+		baud = 663;
 
 	/* Baudrate = 344827,58621 / (R + 1) / (1 + CS * 7) */
 	if (baud < 5400)
-		chip_trans (0xC680 | ((43104 / baud) - 1));
+		return (0xC680 | ((43104 / baud) - 1));
 	else
-		chip_trans (0xC600 | ((344828UL / baud) - 1));
+		return (0xC600 | ((344828UL / baud) - 1));
 }
 
 
-static void
+static unsigned short
 chip_setpower(u8 power, u8 mod)
 {	
-	chip_trans (0x9800 | (power & 7) | ((mod & 15) << 4));
+	return (0x9800 | (power & 7) | ((mod & 15) << 4));
 }
 
 
-static void
-chip_init (void)
-{
-	chip_trans (0xC0E0);	/* AVR CLK: 10MHz */
-	chip_trans (0x80D7);	/* Enable FIFO */
-	chip_trans (0xC2AB);	/* Data Filter: internal */
-	chip_trans (0xCA81);	/* Set FIFO mode */
-	chip_trans (0xE000);	/* disable wakeuptimer */
-	chip_trans (0xC800);	/* disable low duty cycle */
-	chip_trans (0xC4F7);	/* autotuning: -10kHz...+7,5kHz */
-	chip_trans (0x0000);
+/* Update chip status to provided status and mark bottom half to be run. */
+#define chip_start(s)					\
+	do {						\
+		update_chip_status(s);			\
+		queue_task (&chip_task, &tq_timer);	\
+	} while (0)
 
-	chip_setfreq (RFM12FREQ (433.92));
-	chip_setbandwidth (5, 1, 4);
-	chip_setbaud (8620);
-	chip_setpower (0, 2);
-}
+#define chip_start_next() chip_start(chip_status + 1)
 
+/* Enable RX-mode (not BH-safe variant) */
 #define chip_rxstart() (update_chip_status(CHIP_RX), chip_trans (0xf100))
+
+/* Disable RX-mode, but keep oscillator running (not BH-safe) */
 #define chip_rxstop()  (chip_trans (0x8208))
+
+/* Enable TX-mode (BH-safe). */
 #define chip_txstart()					\
 	do {						\
-		update_chip_status(CHIP_TX);		\
 		STATS->tx_packets ++;			\
-		queue_task (&chip_task, &tq_timer);	\
+		chip_start(CHIP_TX);			\
 	} while(0)
+
+/* Initialize the RFM12 module. */
+#define chip_init()    chip_start (CHIP_INIT_CLK)
+
+/* Configure the RFM12 module (baudrate, modulation, frequency, etc.) */
+#define chip_conf()    chip_start (CHIP_CONF_PREP)
 
 
 static void chip_bh (void *foo);
@@ -167,14 +182,14 @@ static struct tq_struct chip_task = {
 };
 
 
-/* Special variants of chip_trans, that tests the return value of `chip_trans',
-   unless successful requeues the bh for execution, restores the context
-   and immediately returns. */
+/* Special variants of chip_trans, that test the return value of `chip_trans',
+   and unless successful mark the BH for re-execution, restoring the context
+   and immediately return. */
 #define __bh(a)								\
 	do {								\
 	        int _r = a;						\
 		if(_r) {						\
-			DEBUG ("%s: __bh fail in line %d.\n",		\
+			DEBUG ("%s: __bh failed in line %d.\n",		\
 			       __FUNCTION__, __LINE__);			\
 			queue_task (&chip_task, &tq_timer);		\
 			chip_status = restore_status;			\
@@ -236,6 +251,13 @@ chip_generate_tx_data (void)
 }
 
 
+/* Short-cut that sends V to the chip and increments chip_status. */
+#define _ini(v)        chip_trans_bh(v); chip_start_next(); break;
+
+/* Wrapper around _ini that calls chip_F function with arguments A to
+   aquire the data to send. */
+#define _ini_f(f,a...) _ini(chip_ ## f (a))
+
 static void
 chip_bh (void *foo)
 {
@@ -252,17 +274,29 @@ chip_bh (void *foo)
 	   has completed.  */
 
 	switch (chip_status) {
+	case CHIP_INIT_CLK:     _ini (0xC0E0); /* AVR CLK: 10MHz      */
+	case CHIP_INIT_ENFIFO:  _ini (0x80D7); /* Enable FIFO         */
+	case CHIP_INIT_FILTER:  _ini (0xC2AB); /* Internal Filter     */
+	case CHIP_INIT_SETFIFO: _ini (0xCA81); /* Set FIFO mode       */
+	case CHIP_INIT_DISWKUP: _ini (0xE000); /* dis. wakeuptimer    */
+	case CHIP_INIT_DISLDC:  _ini (0xC800); /* dis. low duty cycle */
+	case CHIP_INIT_AUTOTUN: _ini (0xC4F7); /* -10kHz...+7,5kHz    */
+
+	case CHIP_CONF_PREP:    _ini (0x0000); /* dummy read */
+
+	case CHIP_CONF_FREQ:    _ini_f (setfreq, RFM12FREQ (433.92));
+	case CHIP_CONF_BW:      _ini_f (setbandwidth, 5, 1, 4);
+	case CHIP_CONF_BAUD:    _ini_f (setbaud, 8620);
+	case CHIP_CONF_PWR:     _ini_f (setpower, 0, 2);
+
 	case CHIP_IDLE:
 		if (tx_packet)
 			/* send queued packet now. */
 			chip_txstart ();
 
-		else {
-			/* Restart RX. */
-			if (chip_rxstart ())
-				/* Failed, try again. XXX */
-				queue_task (&chip_task, &tq_timer);
-		}
+		else
+			chip_rxstart_bh ();
+
 		break;
 
 
@@ -282,8 +316,6 @@ chip_bh (void *foo)
 		unsigned char buf[15];
 		unsigned short len = 1;
 
-		/* send TX-triggering command only on first shot,
-		   so we'll be able to make use of the underrun recognition. */
 		buf[0] = 0xF0 | buffer_position;
 
 		while (chip_status < CHIP_TX_TRIGGER && len < 15) {
@@ -458,10 +490,8 @@ rfm12_status_timer (void)
 			rfm12_net_wake_queue ();
 		}
 
-		update_chip_status(CHIP_IDLE);
-
-		/* leave the work to the bottom half. */
-		queue_task (&chip_task, &tq_timer);
+		/* Reinitialize chip and re-enable RX-mode. */
+		chip_init ();
 	}
 
 	/* Do a status query every 15 seconds. */
@@ -632,11 +662,7 @@ init_module (void)
 	if (rfm12_net_register ())
 		return 1;
 
-	chip_init ();
-	chip_rxstart ();
-
-	/* initiate dummy read */
-	chip_trans (0x0000);
+	chip_init ();		/* This enables RX-mode automagically. */
 
 	h3600_hal_register_driver (&g_driver_ops);
 
