@@ -583,7 +583,20 @@ rfm12_net_rx (struct sk_buff *skb)
 {
 	skb->dev = &rfm12_dev;
 	skb->mac.raw = skb->data;
-	skb->protocol = __constant_htons(ETH_P_IP);
+
+	switch ((skb->data[0] & 0xF0) >> 4) {
+	case 4:
+		skb->protocol = __constant_htons(ETH_P_IP);
+		break;
+	case 6:
+		skb->protocol = __constant_htons(ETH_P_IPV6);
+		break;
+	default:
+		ERROR ("failed to detect protocol: 0x%02x%02x\n",
+		       skb->data[0], skb->data[1]);
+		dev_kfree_skb_irq (skb);
+		return;
+	}
 
 	netif_rx (skb);
 
