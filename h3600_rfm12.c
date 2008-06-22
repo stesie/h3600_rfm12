@@ -627,7 +627,7 @@ static struct net_device rfm12_dev = {
 int
 init_module (void)
 {
-	printk (KERN_INFO MODULE_NAME ": init_module called.\n");
+	DEBUG ("%s called.\n", __FUNCTION__);
 
 	if (rfm12_net_register ())
 		return 1;
@@ -652,7 +652,7 @@ init_module (void)
 void
 cleanup_module (void)
 {
-	printk (KERN_INFO MODULE_NAME ": cleanup_module called.\n");
+	DEBUG ("%s called.\n", __FUNCTION__);
 
 	/* Remove the status timer. */
 	del_timer (&rfm12_timer);
