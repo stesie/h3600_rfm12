@@ -63,6 +63,7 @@ chip_trans(unsigned short a)
 
 
 static enum chip_status_t {
+	CHIP_REINIT,
 	CHIP_IDLE,
 	CHIP_RX,
 	CHIP_RX_DATA,
@@ -136,15 +137,6 @@ chip_setpower(u8 power, u8 mod)
 static void
 chip_init (void)
 {
-	chip_trans (0xC0E0);	/* AVR CLK: 10MHz */
-	chip_trans (0x80D7);	/* Enable FIFO */
-	chip_trans (0xC2AB);	/* Data Filter: internal */
-	chip_trans (0xCA81);	/* Set FIFO mode */
-	chip_trans (0xE000);	/* disable wakeuptimer */
-	chip_trans (0xC800);	/* disable low duty cycle */
-	chip_trans (0xC4F7);	/* autotuning: -10kHz...+7,5kHz */
-	chip_trans (0x0000);
-
 	chip_setfreq (RFM12FREQ (433.92));
 	chip_setbandwidth (5, 1, 4);
 	chip_setbaud (8620);
@@ -252,6 +244,11 @@ chip_bh (void *foo)
 	   has completed.  */
 
 	switch (chip_status) {
+	case CHIP_REINIT:
+		chip_trans_bh (0x0100); /* request re-init. */
+		update_chip_status(CHIP_IDLE);
+		break;
+
 	case CHIP_IDLE:
 		if (tx_packet)
 			/* send queued packet now. */
