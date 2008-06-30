@@ -29,7 +29,7 @@
 
 
 /* Some forward declarations. */
-static void chip_handler (unsigned char byte);
+static void chip_handler (int byte);
 
 static void rfm12_net_wake_queue (void);
 static void rfm12_net_rx (struct sk_buff *skb);
@@ -64,6 +64,7 @@ chip_trans(unsigned short a)
 
 static enum chip_status_t {
 	CHIP_REINIT,
+
 	CHIP_IDLE,
 	CHIP_RX,
 	CHIP_RX_DATA,
@@ -245,8 +246,8 @@ chip_bh (void *foo)
 
 	switch (chip_status) {
 	case CHIP_REINIT:
-		chip_trans_bh (0x0100); /* request re-init. */
-		update_chip_status(CHIP_IDLE);
+		chip_trans_bh (0x0100); /* request re-init, triggers interrupt */
+		update_chip_status (CHIP_IDLE);
 		break;
 
 	case CHIP_IDLE:
@@ -316,9 +317,25 @@ chip_bh (void *foo)
 
 
 static void
-chip_handler (unsigned char byte)
+chip_handler (int byte)
 {
+	if (byte < 0 && (chip_status == CHIP_RX || chip_status == CHIP_RX_DATA)) {
+		/* Got notification while in RX mode, the AVR should have
+		   reinitialized the RFM12 module meanwhile, therefore we just
+		   have to either trigger a TX or restart RX. 
+		   This happens quite often (every time the touchpad is pressed. */
+		DEBUG ("Gnah! Got notification during RX, reinitializing.\n");
+
+		update_chip_status (CHIP_REINIT);
+		queue_task (&chip_task, &tq_timer);
+		return;
+	}
+
 	switch (chip_status) {
+	case CHIP_IDLE:
+		queue_task (&chip_task, &tq_timer);
+		break;
+		
 	case CHIP_RX:
 		packet_len = byte;
 		DEBUG ("RX: len=%d\n", packet_len);
@@ -443,7 +460,7 @@ static void
 rfm12_status_timer (void)
 {
 	/* Time out transfer after 200ms. */
-	if (chip_status > CHIP_RX
+	if (chip_status != CHIP_RX
 	    && timer_last_status_change < jiffies - HZ / 5) {
 		ERROR ("transfer timed out, status=%d\n", chip_status);
 
@@ -455,7 +472,7 @@ rfm12_status_timer (void)
 			rfm12_net_wake_queue ();
 		}
 
-		update_chip_status(CHIP_IDLE);
+		update_chip_status(CHIP_REINIT);
 
 		/* leave the work to the bottom half. */
 		queue_task (&chip_task, &tq_timer);
