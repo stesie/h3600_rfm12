@@ -27,6 +27,9 @@
 #include <asm/arch-sa1100/h3600_hal.h>
 #include "h3600_rfm12.h"
 
+static int rfm12_baud = 8620;
+MODULE_PARM (rfm12_baud, "i");
+MODULE_PARM_DESC (rfm12_baud, "transmitter baudrate (default 8620)");
 
 /* Some forward declarations. */
 static void chip_handler (int byte);
@@ -140,7 +143,7 @@ chip_init (void)
 {
 	chip_setfreq (RFM12FREQ (433.92));
 	chip_setbandwidth (5, 1, 4);
-	chip_setbaud (8620);
+	chip_setbaud (rfm12_baud);
 	chip_setpower (0, 2);
 }
 
@@ -645,6 +648,16 @@ init_module (void)
 
 	if (rfm12_net_register ())
 		return 1;
+
+	if (rfm12_baud < 663) {
+		rfm12_baud = 663;
+		ERROR ("using minimal baudrate of 663.");
+	}
+
+	if (rfm12_baud > 28800) {
+		rfm12_baud = 28800;
+		ERROR ("using maximal baudrate of 28800.");
+	}
 
 	chip_init ();
 	chip_rxstart ();
