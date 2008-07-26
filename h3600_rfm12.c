@@ -70,6 +70,7 @@ static enum chip_status_t {
 
 	CHIP_IDLE,
 	CHIP_RX,
+	CHIP_RX_WAIT_LEN_2,
 	CHIP_RX_DATA,
 	CHIP_RX_FINISH,
 
@@ -78,7 +79,8 @@ static enum chip_status_t {
 	CHIP_TX_PREAMBLE_2,
 	CHIP_TX_PREFIX_1,
 	CHIP_TX_PREFIX_2,
-	CHIP_TX_SIZE,
+	CHIP_TX_SIZE_HI,
+	CHIP_TX_SIZE_LO,
 	CHIP_TX_DATA,
 	CHIP_TX_DATAEND,
 	CHIP_TX_SUFFIX_1,
@@ -207,7 +209,11 @@ chip_generate_tx_data (void)
 		chip_status ++;
 		return 0xD4;
 
-	case CHIP_TX_SIZE:
+	case CHIP_TX_SIZE_HI:
+		chip_status ++;
+		return (tx_packet->len >> 8) & 0xFF; /* Always zero actually. */
+
+	case CHIP_TX_SIZE_LO:
 		chip_status ++;
 		return tx_packet->len & 0xFF;
 
@@ -275,7 +281,8 @@ chip_bh (void *foo)
 	case CHIP_TX_PREAMBLE_2:
 	case CHIP_TX_PREFIX_1:
 	case CHIP_TX_PREFIX_2:
-	case CHIP_TX_SIZE:
+	case CHIP_TX_SIZE_HI:
+	case CHIP_TX_SIZE_LO:
 	case CHIP_TX_DATA:
 	case CHIP_TX_DATAEND:
 	case CHIP_TX_SUFFIX_1:
@@ -340,10 +347,15 @@ chip_handler (int byte)
 		break;
 		
 	case CHIP_RX:
-		packet_len = byte;
+		packet_len = byte << 8;
+		update_chip_status (CHIP_RX_WAIT_LEN_2);
+		break;
+
+	case CHIP_RX_WAIT_LEN_2:
+		packet_len |= byte;
 		DEBUG ("RX: len=%d\n", packet_len);
 
-		if (packet_len)
+		if (packet_len > 0 && packet_len <= 1500)
 			rx_packet = alloc_skb (packet_len, GFP_ATOMIC);
 		else
 			rx_packet = NULL;
@@ -390,7 +402,8 @@ chip_handler (int byte)
 	case CHIP_TX_PREAMBLE_2:
 	case CHIP_TX_PREFIX_1:
 	case CHIP_TX_PREFIX_2:
-	case CHIP_TX_SIZE:
+	case CHIP_TX_SIZE_HI:
+	case CHIP_TX_SIZE_LO:
 	case CHIP_TX_DATA:
 	case CHIP_TX_DATAEND:
 	case CHIP_TX_SUFFIX_1:
@@ -529,9 +542,9 @@ rfm12_net_xmit (struct sk_buff *skb, struct net_device *dev)
 {
 	DEBUG ("TX: len=%d.\n", skb->len);
 
-	if (skb->len > 174) {
+	if (skb->len > 173) {
 		ERROR ("cowardly refusing to send packets longer "
-		       "than 174 bytes.\n");
+		       "than 173 bytes.\n");
 		return 1;
 	}
 
@@ -560,7 +573,7 @@ rfm12_net_init (struct net_device *dev)
 
 	dev->hard_header_len = 0;
 	dev->addr_len = 0;
-	dev->mtu = 174;
+	dev->mtu = 173;
 
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_NOARP | IFF_MULTICAST | IFF_BROADCAST;
