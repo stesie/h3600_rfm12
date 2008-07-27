@@ -31,6 +31,10 @@ static int rfm12_baud = 8620;
 MODULE_PARM (rfm12_baud, "i");
 MODULE_PARM_DESC (rfm12_baud, "transmitter baudrate (default 8620)");
 
+/* Wait 50ms before sending packets. */
+#define TX_DELAY (HZ / 100 * 5)
+
+
 /* Some forward declarations. */
 static void chip_handler (int byte);
 
@@ -46,6 +50,9 @@ static unsigned long timer_last_status_change;
 /* Timestamp (jiffies again) when the last rfm12 status
    query took place. */
 static unsigned long timer_last_status_query;
+
+
+static struct timer_list rfm12_timer;
 
 
 /*
@@ -382,11 +389,14 @@ chip_handler (int byte)
 			rfm12_net_rx (rx_packet);
 			rx_packet = NULL;
 
-			if (tx_packet)
-				chip_txstart ();
+			update_chip_status(CHIP_RX);
 
-			else
-				update_chip_status(CHIP_RX);
+			if (tx_packet) {
+				/* Update timer to trigger TX there. */
+				del_timer (&rfm12_timer);
+				rfm12_timer.expires = jiffies + TX_DELAY;
+				add_timer (&rfm12_timer);
+			}
 		}
 
 		break;
@@ -436,7 +446,14 @@ chip_queue_tx (struct sk_buff *skb)
 	if (chip_status <= CHIP_RX) {
 		/* Chip is inactive, we can transmit immediately. */
 		tx_packet = skb;
-		chip_txstart ();
+
+		/* We don't trigger TX immediately but ask the timer to
+		   do it if TX_DELAY is over.  This is to account for
+		   another packet that might immediately follow the one
+		   we've just received. */
+		del_timer (&rfm12_timer);
+		rfm12_timer.expires = jiffies + TX_DELAY;
+		add_timer (&rfm12_timer);
 	}
 
 	else if (tx_packet == NULL)
@@ -464,11 +481,13 @@ static struct h3600_driver_ops g_driver_ops = {
  * Status call timer
  */
 
-static struct timer_list rfm12_timer;
-
 static void
 rfm12_status_timer (void)
 {
+	/* Send queued packet, if chip is idle. */
+	if (chip_status == CHIP_RX && tx_packet)
+		chip_txstart ();
+
 	/* Time out transfer after 200ms. */
 	if (chip_status != CHIP_RX
 	    && timer_last_status_change < jiffies - HZ / 5) {
