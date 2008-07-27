@@ -72,7 +72,6 @@ static enum chip_status_t {
 	CHIP_RX,
 	CHIP_RX_WAIT_LEN_2,
 	CHIP_RX_DATA,
-	CHIP_RX_FINISH,
 
 	CHIP_TX,
 	CHIP_TX_PREAMBLE_1,
@@ -391,11 +390,6 @@ chip_handler (int byte)
 		}
 
 		break;
-
-	case CHIP_RX_FINISH:
-		DEBUG ("%s: RX_FINISH set, ignoring byte=0x%02x.\n",
-		       __FUNCTION__, byte);
-		break;		/* hmm, packet already complete */
 
 	case CHIP_TX:
 	case CHIP_TX_PREAMBLE_1:
