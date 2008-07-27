@@ -200,6 +200,8 @@ static struct tq_struct chip_task = {
 static unsigned char
 chip_generate_tx_data (void)
 {
+	static int offset = 0;
+
 	switch (chip_status) {
 	case CHIP_TX:
 	case CHIP_TX_PREAMBLE_1:
@@ -220,15 +222,17 @@ chip_generate_tx_data (void)
 		return (tx_packet->len >> 8) & 0xFF; /* Always zero actually. */
 
 	case CHIP_TX_SIZE_LO:
+		offset = 0;
 		chip_status ++;
 		return tx_packet->len & 0xFF;
 
 	case CHIP_TX_DATA:
 		STATS->tx_bytes ++;
-		int r = (tx_packet->data[0] & 0xFF);
-		skb_pull (tx_packet, 1);
-		if (!tx_packet->len)
+		int r = (tx_packet->data[offset ++] & 0xFF);
+
+		if (offset == tx_packet->len)
 			chip_status = CHIP_TX_SUFFIX_1;
+
 		return r;
 
 	case CHIP_TX_SUFFIX_1:
