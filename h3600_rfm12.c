@@ -330,7 +330,7 @@ chip_bh (void *foo)
 		break;
 
 	default:
-		ERROR ("%s: unexpected chip_status=%d\n",
+		DEBUG ("%s: unexpected chip_status=%d\n",
 		       __FUNCTION__, chip_status);
 	}
 }
@@ -349,6 +349,15 @@ chip_handler (int byte)
 		update_chip_status (CHIP_REINIT);
 		queue_task (&chip_task, &tq_timer);
 		return;
+	}
+
+	if (byte >= 0 && (chip_status >= CHIP_TX)) {
+		/* Received data byte while in TX, i.e. we've received data
+		   from the RFM12 while filling the AVRs buffer. */
+		DEBUG ("Gnah! Rcv'd data while TX in progress.\n");
+		
+		update_chip_status (CHIP_RX);
+		/* Fall through, accept the byte as the start of a packet. */
 	}
 
 	switch (chip_status) {
@@ -594,7 +603,7 @@ rfm12_net_init (struct net_device *dev)
 
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_NOARP | IFF_MULTICAST | IFF_BROADCAST;
-	dev->tx_queue_len = 10;
+	dev->tx_queue_len = 5;
 
 	dev->priv = kmalloc (sizeof (struct net_device_stats), GFP_KERNEL);
 	if (! dev->priv)
